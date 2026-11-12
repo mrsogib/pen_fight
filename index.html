@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Pen Fight — Kolom Juddho</title>
+<title>Pen খেলবি?</title>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
@@ -247,12 +247,15 @@ const MAX_TIEBREAK          = 3;
 
 const EVERY_OTHER_MIN = 6;
 
-const TURN_MS          = 30000; // Updated to 30 seconds
+const TURN_MS          = 30000; 
 const DISCONNECT_GRACE = 30000;
 const PEER_ID_PREFIX   = 'pfj-v2-';
 const NOTIFY_MS        = 1800;
 
-// Added TURN servers for mobile network NAT traversal
+// Heartbeat settings
+const PING_INTERVAL = 3000; 
+const PONG_TIMEOUT = 8000;
+
 const PEER_CONFIG = {
   debug: 0,
   config: {
@@ -368,6 +371,7 @@ let onlineRoundsOverridden = false;
 let turnStartTime = 0;
 let turnDeadline = 0;
 let guestReconnectAttempts = 0;
+let lastPingTime = 0;
 
 /* =========================================================
    CHAT
@@ -797,10 +801,11 @@ function hostTryCreate(attempt) {
     net.mySlot = 0;
     onlinePlayers = [{
       slot: 0, token: MY_TOKEN, name: savedOrTypedName(), ready: true,
-      connected: true, spectator: false, isHost: true, disconnectedAt: null
+      connected: true, spectator: false, isHost: true, disconnectedAt: null, lastPongAt: performance.now()
     }];
     onlineRounds = defaultRoundsFor(1);
     onlineRoundsOverridden = false;
+    lastPingTime = performance.now();
     paintLobby();
   });
   net.peer.on('error', (e) => {
@@ -830,6 +835,7 @@ function guestTryJoin(code, silent) {
   net.phase = 'joining';
   let timedOut = false;
 
+  if (net.peer) { try { net.peer.destroy(); } catch(e){} }
   try { net.peer = new Peer(PEER_CONFIG); }
   catch(e) {
     if (!silent) pushNotification('Peer create failed: ' + e.message, 'danger');
@@ -844,7 +850,7 @@ function guestTryJoin(code, silent) {
       leaveRoom();
       if (gameState === 'menu') paintMenu();
     }
-  }, 15000);
+  }, 20000);
 
   net.peer.on('open', () => {
     const conn = net.peer.connect(PEER_ID_PREFIX + code, { reliable: true });
@@ -888,6 +894,7 @@ function leaveRoom() {
   chatBadge.classList.remove('show');
   chatFloat.classList.remove('show');
   chatToggle.classList.remove('show');
+  try { localStorage.removeItem('pfj_room'); } catch(e){}
 }
 
 function onHostDisconnect() {
@@ -906,10 +913,12 @@ function attemptGuestReconnect() {
   guestReconnectAttempts++;
   const code = net.roomCode;
   const myName = (onlinePlayers[net.mySlot] && onlinePlayers[net.mySlot].name) || savedOrTypedName();
+  
   if (net.hostConn) { try { net.hostConn.close(); } catch(e){} }
   if (net.peer) { try { net.peer.destroy(); } catch(e){} }
   net.hostConn = null; net.peer = null;
   net.phase = 'joining'; net.roomCode = code;
+  
   setTimeout(() => {
     try { net.peer = new Peer(PEER_CONFIG); }
     catch(e) { setTimeout(attemptGuestReconnect, 1500); return; }
@@ -926,6 +935,43 @@ function attemptGuestReconnect() {
 }
 
 /* =========================================================
+   HEARTBEAT & DISCONNECT HANDLING
+   ========================================================= */
+function hostMarkDisconnected(me, reason) {
+  if (!me.connected) return;
+  me.connected = false;
+  me.disconnectedAt = performance.now();
+  hostBroadcastLobby();
+  hostNotifyAll(`${me.name} ${reason}`, 'warn');
+  addChat({ sys: true, text: `${me.name} ${reason}` });
+
+  const capturedToken = me.token;
+  setTimeout(() => {
+    const still = onlinePlayers.find(x => x.token === capturedToken);
+    if (still && !still.connected && still.disconnectedAt && performance.now() - still.disconnectedAt >= DISCONNECT_GRACE - 200) {
+      hostRemovePlayer(still, 'was removed (disconnected)');
+    }
+  }, DISCONNECT_GRACE + 200);
+}
+
+function hostHeartbeat() {
+  if (document.hidden || !net.isHost) return;
+  const now = performance.now();
+  
+  if (now - lastPingTime > PING_INTERVAL) {
+    netBroadcast({ t: 'ping' });
+    lastPingTime = now;
+    
+    for (const p of onlinePlayers) {
+      if (p.isHost) continue;
+      if (p.connected && now - p.lastPongAt > PONG_TIMEOUT) {
+        hostMarkDisconnected(p, 'connection lost');
+      }
+    }
+  }
+}
+
+/* =========================================================
    HOST MESSAGE HANDLERS
    ========================================================= */
 function hostOnGuestMessage(conn, msg) {
@@ -935,14 +981,15 @@ function hostOnGuestMessage(conn, msg) {
     const token = String(msg.token || '').slice(0, 40);
     const name  = String(msg.name || 'Player').slice(0, 20);
     const existing = onlinePlayers.find(p => p.token === token);
+    
     if (existing) {
-      if (existing.connected) {
-        netSendTo(conn, { t: 'reject', reason: 'Another session is already in this room.' });
-        setTimeout(() => { try { conn.close(); } catch(e){} }, 100);
-        return;
+      if (net.conns[token]) {
+        try { net.conns[token].close(); } catch(e){}
+        delete net.conns[token];
       }
       existing.connected = true;
       existing.disconnectedAt = null;
+      existing.lastPongAt = performance.now();
       if (name) existing.name = name;
       net.conns[token] = conn;
       conn.metadata = { token };
@@ -952,6 +999,7 @@ function hostOnGuestMessage(conn, msg) {
       addChat({ sys: true, text: `${existing.name} reconnected` });
       return;
     }
+    
     if (onlinePlayers.length >= 10) {
       netSendTo(conn, { t: 'reject', reason: 'Room is full (10 max).' });
       setTimeout(() => { try { conn.close(); } catch(e){} }, 100);
@@ -962,7 +1010,7 @@ function hostOnGuestMessage(conn, msg) {
     const p = {
       slot, token, name: name || ('P' + (slot + 1)),
       ready: false, connected: true, spectator: isSpectator,
-      isHost: false, disconnectedAt: null
+      isHost: false, disconnectedAt: null, lastPongAt: performance.now()
     };
     onlinePlayers.push(p);
     net.conns[token] = conn;
@@ -985,6 +1033,16 @@ function hostOnGuestMessage(conn, msg) {
   if (!me) return;
 
   switch (msg.t) {
+    case 'pong':
+      me.lastPongAt = performance.now();
+      if (!me.connected) {
+        me.connected = true;
+        me.disconnectedAt = null;
+        hostBroadcastLobby();
+        hostNotifyAll(`${me.name} reconnected`, 'join');
+        addChat({ sys: true, text: `${me.name} reconnected` });
+      }
+      break;
     case 'ready':
       if (gameState !== 'menu' || me.spectator) return;
       const was = me.ready;
@@ -1015,11 +1073,10 @@ function buildWelcomePacket(p) {
     players: onlinePlayers.map(publicPlayer),
     rounds: onlineRounds, roundsOverridden: onlineRoundsOverridden,
     scores: onlineScores.slice(), round: roundIndex,
-    turnSlot: (mode === 'online' && gameState === 'aiming') ? turn : -1,
-    remainingMs: (mode === 'online' && gameState === 'aiming')
-      ? Math.max(0, turnDeadline - performance.now()) : 0,
-    phase: (gameState === 'menu') ? 'lobby'
-         : (gameState === 'matchend' ? 'ended' : 'playing'),
+    turnSlot: (mode === 'online') ? turn : -1,
+    remainingMs: (mode === 'online' && gameState === 'aiming') ? Math.max(0, turnDeadline - performance.now()) : 0,
+    phase: gameState === 'menu' ? 'lobby' : (gameState === 'matchend' ? 'ended' : 'playing'),
+    gameState: gameState,
     pens: (gameState !== 'menu' && pens.length) ? serializePens(pens) : null,
   };
 }
@@ -1029,20 +1086,7 @@ function hostOnConnClosed(conn) {
   if (!token) return;
   const me = onlinePlayers.find(p => p.token === token);
   if (!me) return;
-  me.connected = false;
-  me.disconnectedAt = performance.now();
-  hostBroadcastLobby();
-  hostNotifyAll(`${me.name} disconnected — 30s to reconnect`, 'warn');
-  addChat({ sys: true, text: `${me.name} disconnected` });
-
-  const capturedToken = token;
-  setTimeout(() => {
-    const still = onlinePlayers.find(p => p.token === capturedToken);
-    if (still && !still.connected && still.disconnectedAt &&
-        performance.now() - still.disconnectedAt >= DISCONNECT_GRACE - 200) {
-      hostRemovePlayer(still, 'was removed (disconnected)');
-    }
-  }, DISCONNECT_GRACE + 200);
+  hostMarkDisconnected(me, 'disconnected');
 }
 
 function hostRemovePlayer(me, why) {
@@ -1131,6 +1175,9 @@ function guestOnHostMessage(msg) {
   if (!msg || !msg.t) return;
 
   switch (msg.t) {
+    case 'ping':
+      netSendToHost({ t: 'pong' });
+      return;
     case 'reject':
       pushNotification(msg.reason || 'Cannot join.', 'danger', 3000);
       leaveRoom();
@@ -1147,6 +1194,9 @@ function guestOnHostMessage(msg) {
       onlineRounds = msg.rounds;
       onlineRoundsOverridden = !!msg.roundsOverridden;
       onlineScores = msg.scores || [];
+      
+      try { localStorage.setItem('pfj_room', JSON.stringify({ code: net.roomCode, ts: Date.now() })); } catch(e){}
+
       if (msg.phase === 'playing' && msg.pens) {
         mode = 'online';
         playerCount = onlinePlayers.length;
@@ -1158,7 +1208,9 @@ function guestOnHostMessage(msg) {
         turn = msg.turnSlot != null ? msg.turnSlot : -1;
         turnStartTime = performance.now();
         turnDeadline = turnStartTime + (msg.remainingMs || 0);
-        gameState = 'aiming';
+        
+        gameState = msg.gameState || 'aiming'; 
+        
         overlay.classList.remove('show');
         chatToggle.classList.add('show');
         chatFloat.classList.remove('show');
@@ -1632,6 +1684,8 @@ function doAIShot() {
    UPDATE
    ========================================================= */
 function update(dt) {
+  hostHeartbeat();
+
   const active = (gameState === 'aiming' || gameState === 'moving' ||
                   gameState === 'ai' || gameState === 'roundend');
   if (active) {
@@ -2128,6 +2182,14 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   lastT = performance.now();
   acc = 0; settleTimer = 0; aiTimer = Math.min(aiTimer, 0.65);
+  if (mode === 'online') {
+    if (net.isHost) {
+      lastPingTime = performance.now();
+      for (const p of onlinePlayers) p.lastPongAt = performance.now();
+    } else if (net.hostConn) {
+      netSendToHost({ t: 'pong' });
+    }
+  }
 });
 
 /* =========================================================
@@ -2137,7 +2199,7 @@ function paintMenu() {
   const preRoom = (new URLSearchParams(location.search)).get('room') || '';
   const savedNm = getSavedName();
   panel.innerHTML = `
-    <h1>PEN FIGHT</h1>
+    <h1>Pen খেলবি?</h1>
     <p class="sub"><b>Kolom Juddho</b> — the classic Bangladeshi school-desk duel.</p>
 
     <div class="diff" style="margin-bottom:1em">
