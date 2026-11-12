@@ -80,7 +80,7 @@
   .standRow .standScore{margin-left:auto;font-weight:800;color:#fff}
   .standRow.winner{background:rgba(251,191,36,.18);color:#fde68a}
   .endBtns{display:flex;gap:.6em;justify-content:center;flex-wrap:wrap;margin-top:.6em}
-  .linkBox{display:block;font-size:11px;color:#64748b;word-break:break-all;margin-top:.4em;user-select:text;-webkit-user-select:text}
+  .copyRow{display:flex;gap:.5em;justify-content:center;flex-wrap:wrap;margin:.4em 0 1em}
   .lobbyList{display:flex;flex-direction:column;gap:.3em;margin:.8em auto;max-width:380px;text-align:left}
   .lobbyRow{
     display:flex;align-items:center;gap:.6em;padding:.45em .8em;border-radius:8px;
@@ -276,9 +276,9 @@ const COM_TO_GEOM  = PEN_LEN / 2 - COM_FROM_CAP;
 
 const PEN_MASS      = 0.6;
 const FIXED        = 1 / 240;
-const DAMP_LIN     = 0.3;   // Reduced for better sliding
+const DAMP_LIN     = 0.3;
 const DAMP_ANG     = 0.3;
-const FRIC_LIN     = 80;    // Reduced for better sliding
+const FRIC_LIN     = 80;
 const FRIC_ANG     = 1.5;
 
 const MAX_DRAG     = 160;
@@ -1046,7 +1046,6 @@ function hostOnGuestMessage(conn, msg) {
       return;
     }
     const slot = onlinePlayers.length;
-    // BUG FIX: Allow new players to join as normal players if game is in menu OR matchend
     const isSpectator = (gameState !== 'menu' && gameState !== 'matchend');
     const p = {
       slot, token, name: name || ('P' + (slot + 1)),
@@ -1896,7 +1895,6 @@ function update(dt) {
     if (performance.now() > turnDeadline) hostTimeout();
   }
   
-  // Update sparks
   for (let i = sparks.length - 1; i >= 0; i--) {
     const s = sparks[i];
     s.x += s.vx * dt;
@@ -1920,7 +1918,6 @@ function roundRect(c, x, y, w, h, r) {
   c.closePath();
 }
 
-/* ---------- DESK (deterministic wood, slightly darker) ---------- */
 let deskCache = null;
 
 function buildDeskCache() {
@@ -2271,7 +2268,6 @@ function render() {
   }
   drawAim();
   
-  // Render sparks
   for (const s of sparks) {
     ctx.fillStyle = `rgba(255, 220, 100, ${s.life / s.maxLife})`;
     ctx.beginPath();
@@ -2578,9 +2574,10 @@ function paintLobby() {
 
   panel.innerHTML = `
     <h1>${escapeHtml(net.roomCode)}</h1>
-    <p class="sub" style="margin-bottom:.6em">Share this link with your friends</p>
-    <div style="display:flex;justify-content:center;margin:.4em 0 1em">
-      <input type="text" readonly value="${escapeHtml(roomLink)}" onclick="this.select()" style="width:100%;max-width:380px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:.6em 1em;color:#e8ecf4;font-size:12px;outline:none;text-align:center"/>
+    <p class="sub" style="margin-bottom:.6em">Share this code or link with your friends</p>
+    <div class="copyRow">
+      <button class="btn small" id="copyLink">📋 Copy Link</button>
+      <button class="btn small secondary" id="copyCode">Copy Code</button>
     </div>
 
     <div class="diff-label" style="margin-top:1em">
@@ -2620,6 +2617,41 @@ function paintLobby() {
 }
 
 function wireLobby() {
+  const copyLink = document.getElementById('copyLink');
+  if (copyLink) copyLink.onclick = () => {
+    const link = `${location.origin}${location.pathname}?room=${net.roomCode}`;
+    navigator.clipboard.writeText(link).then(() => {
+      copyLink.textContent = '✓ Copied!';
+      setTimeout(() => { copyLink.textContent = '📋 Copy Link'; }, 1500);
+    }).catch(() => {
+      const input = document.createElement('input');
+      input.value = link;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      document.body.removeChild(input);
+      copyLink.textContent = '✓ Copied!';
+      setTimeout(() => { copyLink.textContent = '📋 Copy Link'; }, 1500);
+    });
+  };
+  
+  const copyCode = document.getElementById('copyCode');
+  if (copyCode) copyCode.onclick = () => {
+    navigator.clipboard.writeText(net.roomCode).then(() => {
+      copyCode.textContent = '✓ Copied!';
+      setTimeout(() => { copyCode.textContent = 'Copy Code'; }, 1500);
+    }).catch(() => {
+      const input = document.createElement('input');
+      input.value = net.roomCode;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      document.body.removeChild(input);
+      copyCode.textContent = '✓ Copied!';
+      setTimeout(() => { copyCode.textContent = 'Copy Code'; }, 1500);
+    });
+  };
+
   const roundRow = document.getElementById('lobbyRoundRow');
   if (roundRow && net.isHost) {
     roundRow.querySelectorAll('[data-rounds]').forEach(b => {
