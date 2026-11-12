@@ -250,8 +250,21 @@ const EVERY_OTHER_MIN = 6;
 const TURN_MS          = 15000;
 const DISCONNECT_GRACE = 30000;
 const PEER_ID_PREFIX   = 'pfj-v2-';
-const PEER_CONFIG      = { debug: 0 };
 const NOTIFY_MS        = 1800;
+
+// Added TURN servers for mobile network NAT traversal
+const PEER_CONFIG = {
+  debug: 0,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'turn:eu-0.turn.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
+    ]
+  }
+};
 
 const PEN_INERTIA = (() => {
   const mBody = 0.8, mCap = 0.2;
@@ -815,36 +828,54 @@ function guestTryJoin(code, silent) {
   net.roomCode = code;
   net.isHost = false;
   net.phase = 'joining';
+  let timedOut = false;
+
   try { net.peer = new Peer(PEER_CONFIG); }
   catch(e) {
     if (!silent) pushNotification('Peer create failed: ' + e.message, 'danger');
     net.phase = 'idle';
     return;
   }
-  net.peer.on('open', () => {
-    const conn = net.peer.connect(PEER_ID_PREFIX + code, { reliable: true });
-    net.hostConn = conn;
-    conn.on('open', () => {
-      netSendToHost({ t: 'hello', token: MY_TOKEN, name: savedOrTypedName() });
-    });
-    conn.on('data', (msg) => { guestReconnectAttempts = 0; guestOnHostMessage(msg); });
-    conn.on('close', () => guestOnHostClosed());
-    conn.on('error', () => {});
-  });
-  net.peer.on('error', (e) => {
-    if (!silent) {
-      pushNotification('Join failed: ' + e.type + '. Check the code.', 'danger', 3000);
-      leaveRoom();
-      if (gameState === 'menu') paintMenu();
-    }
-  });
-  setTimeout(() => {
+
+  const joinTimeout = setTimeout(() => {
+    timedOut = true;
     if (net.phase === 'joining' && !silent) {
       pushNotification('Could not reach the room. Check the code.', 'danger', 3000);
       leaveRoom();
       if (gameState === 'menu') paintMenu();
     }
-  }, 8000);
+  }, 15000);
+
+  net.peer.on('open', () => {
+    const conn = net.peer.connect(PEER_ID_PREFIX + code, { reliable: true });
+    net.hostConn = conn;
+    
+    conn.on('open', () => {
+      clearTimeout(joinTimeout);
+      netSendToHost({ t: 'hello', token: MY_TOKEN, name: savedOrTypedName() });
+    });
+    
+    conn.on('data', (msg) => { guestReconnectAttempts = 0; guestOnHostMessage(msg); });
+    conn.on('close', () => guestOnHostClosed());
+    
+    conn.on('error', (e) => {
+      clearTimeout(joinTimeout);
+      if (!silent && !timedOut) {
+        pushNotification('Room not found or host is offline.', 'danger', 3000);
+        leaveRoom();
+        if (gameState === 'menu') paintMenu();
+      }
+    });
+  });
+
+  net.peer.on('error', (e) => {
+    clearTimeout(joinTimeout);
+    if (!silent && !timedOut) {
+      pushNotification('Join failed: ' + e.type + '. Check the code.', 'danger', 3000);
+      leaveRoom();
+      if (gameState === 'menu') paintMenu();
+    }
+  });
 }
 
 function leaveRoom() {
@@ -1149,10 +1180,39 @@ function guestOnHostMessage(msg) {
       }
       return;
     }
+    case 'start': {
+      // NEW: Handle the start signal so the guest enters the game properly
+      setSeed(msg.seed);
+      totalRounds = msg.rounds;
+      playerCount = msg.players.length;
+      onlinePlayers = msg.players.map(publicPlayer);
+      onlineScores = msg.scores || [];
+      score = onlineScores.slice();
+      while (score.length < playerCount) score.push(0);
+      roundIndex = 0;
+      spectating = false;
+      mode = 'online';
+      gameState = 'aiming';
+      overlay.classList.remove('show');
+      chatToggle.classList.add('show');
+      chatFloat.classList.remove('show');
+      unreadChat = 0;
+      chatBadge.classList.remove('show');
+      return;
+    }
     case 'lobby':
       onlinePlayers = msg.players.map(publicPlayer);
       onlineRounds = msg.rounds;
       onlineRoundsOverridden = !!msg.roundsOverridden;
+      
+      // NEW: If host clicked NEW MATCH, force guest out of the game and back to lobby
+      if (gameState === 'matchend' || gameState === 'aiming' || gameState === 'moving') {
+        gameState = 'menu';
+        overlay.classList.add('show');
+        chatToggle.classList.remove('show');
+        chatFloat.classList.remove('show');
+        addChat({ sys: true, text: 'Host started a new lobby.' });
+      }
       if (gameState === 'menu') paintLobby();
       return;
     case 'chat':
@@ -1494,7 +1554,7 @@ function showMatchEnd() {
       chatToggle.classList.remove('show');
       onlineRounds = defaultRoundsFor(onlinePlayers.length);
       onlineRoundsOverridden = false;
-      hostBroadcastLobby();
+      hostBroadcastLobby(); // This triggers the guest to return to lobby
       paintLobby();
     };
   }
@@ -2274,6 +2334,10 @@ function paintLobby() {
       roundBtns.push(`<button data-rounds="${n}" class="${n === onlineRounds ? 'active' : ''}" disabled>${n}</button>`);
     }
   }
+  
+  // Preserve chat input draft on re-render
+  const oldChatInput = document.getElementById('lobbyChatInput');
+  const chatDraft = oldChatInput ? oldChatInput.value : '';
 
   panel.innerHTML = `
     <h1>${escapeHtml(net.roomCode)}</h1>
@@ -2298,7 +2362,7 @@ function paintLobby() {
     <div class="diff-label" style="margin-top:.6em">Room Chat (everyone)</div>
     <div class="chatBox" id="lobbyChat">${chatHtml}</div>
     <div class="chatRow">
-      <input class="chatInput" id="lobbyChatInput" maxlength="200" placeholder="Type a message..."/>
+      <input class="chatInput" id="lobbyChatInput" maxlength="200" placeholder="Type a message..." value="${escapeHtml(chatDraft)}"/>
       <button class="btn small" id="lobbyChatSend">Send</button>
     </div>
 
