@@ -247,7 +247,7 @@ const MAX_TIEBREAK          = 3;
 
 const EVERY_OTHER_MIN = 6;
 
-const TURN_MS          = 15000;
+const TURN_MS          = 30000; // Updated to 30 seconds
 const DISCONNECT_GRACE = 30000;
 const PEER_ID_PREFIX   = 'pfj-v2-';
 const NOTIFY_MS        = 1800;
@@ -1181,7 +1181,6 @@ function guestOnHostMessage(msg) {
       return;
     }
     case 'start': {
-      // NEW: Handle the start signal so the guest enters the game properly
       setSeed(msg.seed);
       totalRounds = msg.rounds;
       playerCount = msg.players.length;
@@ -1205,7 +1204,6 @@ function guestOnHostMessage(msg) {
       onlineRounds = msg.rounds;
       onlineRoundsOverridden = !!msg.roundsOverridden;
       
-      // NEW: If host clicked NEW MATCH, force guest out of the game and back to lobby
       if (gameState === 'matchend' || gameState === 'aiming' || gameState === 'moving') {
         gameState = 'menu';
         overlay.classList.add('show');
@@ -1554,7 +1552,7 @@ function showMatchEnd() {
       chatToggle.classList.remove('show');
       onlineRounds = defaultRoundsFor(onlinePlayers.length);
       onlineRoundsOverridden = false;
-      hostBroadcastLobby(); // This triggers the guest to return to lobby
+      hostBroadcastLobby();
       paintLobby();
     };
   }
@@ -2199,7 +2197,7 @@ function paintMenu() {
     <p class="hint">
       <b>Drag backwards</b> from your pen, then release to flick.<br>
       <b>Broadside</b> flicks hit hard · <b>end-on</b> flicks are weak.<br>
-      <b>Online:</b> 15s per turn · disconnects have a 30s grace period.
+      <b>Online:</b> 30s per turn · disconnects have a 30s grace period.
     </p>
   `;
   overlay.classList.add('show');
@@ -2335,7 +2333,6 @@ function paintLobby() {
     }
   }
   
-  // Preserve chat input draft on re-render
   const oldChatInput = document.getElementById('lobbyChatInput');
   const chatDraft = oldChatInput ? oldChatInput.value : '';
 
