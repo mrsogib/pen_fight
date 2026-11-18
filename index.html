@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Pen খেলবি?</title>
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{
@@ -16,16 +15,19 @@
     -webkit-user-select:none;user-select:none;
   }
   #game{position:relative;width:min(96vw,900px,132vh);aspect-ratio:900/620}
-  #cv{
-    width:100%;height:100%;display:block;border-radius:16px;
+  #game::before{
+    content:'';position:absolute;inset:0;border-radius:16px;z-index:0;
     box-shadow:0 30px 80px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.06);
+  }
+  #cv{
+    position:relative;z-index:1;
+    width:100%;height:100%;display:block;border-radius:16px;
     cursor:crosshair;touch-action:none;
   }
   #overlay{
     position:fixed;inset:0;z-index:20;
     display:none;align-items:center;justify-content:center;
-    background:rgba(8,9,14,.82);
-    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+    background:rgba(8,9,14,.9);
     padding:16px;touch-action:pan-y;
   }
   #overlay.show{display:flex}
@@ -128,6 +130,14 @@
     width:130px;text-align:center;font-family:ui-monospace,Menlo,monospace;
   }
   .codeInput:focus{outline:2px solid #3b82f6;border-color:transparent}
+  .sigBox{
+    width:100%;height:64px;resize:none;display:block;margin:.3em 0;
+    font:11px/1.3 ui-monospace,Menlo,monospace;padding:.5em .6em;border-radius:9px;
+    border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);
+    color:#e8ecf4;outline:none;word-break:break-all;user-select:text;-webkit-user-select:text;
+  }
+  .sigBox:focus{border-color:#3b82f6}
+  #chatInviteSlot:not(:empty){margin-bottom:.6em;padding-bottom:.6em;border-bottom:1px solid rgba(255,255,255,.1)}
   .statusLine{font-size:12px;color:#94a3b8;margin:.5em 0;min-height:1.2em}
   #chatToggle{
     position:absolute;bottom:12px;right:12px;z-index:15;
@@ -150,7 +160,6 @@
     border:1px solid rgba(255,255,255,.1);border-radius:12px;
     padding:.7em;display:none;
     box-shadow:0 20px 60px rgba(0,0,0,.6);
-    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
   }
   #chatFloat.show{display:block}
   #chatFloat .chatBox{max-height:180px;margin:0 0 .4em}
@@ -165,7 +174,6 @@
     border:1px solid rgba(255,255,255,.15);
     color:#e8ecf4;font-size:13px;font-weight:700;letter-spacing:.02em;
     box-shadow:0 10px 30px rgba(0,0,0,.5);
-    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
     animation:noteIn .28s cubic-bezier(.2,1.4,.5,1);
     max-width:min(90vw,500px);text-align:center;
   }
@@ -180,8 +188,7 @@
   
   .rotate-modal {
     position: fixed; inset: 0; z-index: 100;
-    background: rgba(8, 9, 14, 0.95);
-    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    background: rgba(8, 9, 14, 0.97);
     display: none; align-items: center; justify-content: center;
     padding: 24px; text-align: center; flex-direction: column;
   }
@@ -226,6 +233,7 @@
   </div>
   <button id="chatToggle" title="Room Chat">💬<span class="badge" id="chatBadge">0</span></button>
   <div id="chatFloat">
+    <div id="chatInviteSlot"></div>
     <div class="chatBox" id="chatFloatBox"></div>
     <div class="chatRow">
       <input class="chatInput" id="chatFloatInput" placeholder="Type a message to everyone..."/>
@@ -239,16 +247,10 @@
 (() => {
 'use strict';
 
-/* =========================================================
-   ROTATE PROMPT
-   ========================================================= */
 document.getElementById('dismissRotate').addEventListener('click', () => {
   document.getElementById('rotateModal').classList.add('dismissed');
 });
 
-/* =========================================================
-   HOST REFRESH WARNING
-   ========================================================= */
 window.addEventListener('beforeunload', (e) => {
   if (net.isHost && net.phase !== 'idle') {
     e.preventDefault();
@@ -256,16 +258,30 @@ window.addEventListener('beforeunload', (e) => {
   }
 });
 
-/* =========================================================
-   CONSTANTS
-   ========================================================= */
 const W = 900, H = 620;
 const canvas = document.getElementById('cv');
 const ctx = canvas.getContext('2d');
-const DPR = Math.min(window.devicePixelRatio || 1, 2);
-canvas.width = W * DPR;
-canvas.height = H * DPR;
-ctx.scale(DPR, DPR);
+let DPR = 1, fitted = false; // backing-store scale (matches on-screen size, capped at 2)
+let canvasRect = null;       // cached so pointermove never forces layout
+let sceneCache = null;       // background + desk, drawn once
+let deskCache = null;
+const penSprites = [];       // pre-rendered pens per palette colour
+let renderAlpha = 1;         // physics interpolation factor
+
+function fitCanvas() {
+  const r = canvas.getBoundingClientRect();
+  canvasRect = r;
+  const dpr = window.devicePixelRatio || 1;
+  let s = r.width > 0 ? (r.width * dpr) / W : Math.min(dpr, 2);
+  s = Math.round(clamp(s, 0.75, 2) * 100) / 100;
+  if (fitted && Math.abs(s - DPR) < 0.01) return;
+  fitted = true;
+  DPR = s;
+  canvas.width  = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  sceneCache = null; deskCache = null; penSprites.length = 0;
+}
 
 const DESK = { x: 60, y: 86, w: 780, h: 460 };
 
@@ -274,17 +290,19 @@ const PEN_HALF = (PEN_LEN - PEN_WID) / 2;
 const COM_FROM_CAP = 0.40 * PEN_LEN;
 const COM_TO_GEOM  = PEN_LEN / 2 - COM_FROM_CAP;
 
-const PEN_MASS      = 0.6;
+// --- FAST & ENDS FAST PHYSICS ---
+const PEN_MASS      = 0.5;    // Exactly 0.5 as requested
 const FIXED        = 1 / 240;
-const DAMP_LIN     = 0.3;
-const DAMP_ANG     = 0.3;
-const FRIC_LIN     = 80;
-const FRIC_ANG     = 1.5;
+const DAMP_LIN     = 0.1;     // Heavy air resistance to slow down quickly
+const DAMP_ANG     = 0.1;
+const FRIC_LIN     = 250;     // High surface friction
+const FRIC_ANG     = 5.0;
 
-const MAX_DRAG     = 160;
-const MAX_SPEED    = 1300;
-const FLICK_TORQUE = 0.20;
-const MAX_SPIN     = 40;
+const MAX_DRAG     = 100;     // Shorter drag required for max power
+const MAX_SPEED    = 1200;    // Reduced max power so it doesn't fly forever
+const FLICK_TORQUE = 0.2;     // Less crazy spinning
+const MAX_SPIN     = 35;
+// -----------------------------
 
 const MIN_DRAG     = 18;
 const TOUCH_RADIUS = PEN_RAD + 48;
@@ -298,21 +316,126 @@ const EVERY_OTHER_MIN = 6;
 
 const TURN_MS          = 30000; 
 const DISCONNECT_GRACE = 30000;
-const PEER_ID_PREFIX   = 'pfj-v2-';
 const NOTIFY_MS        = 1800;
 
-const PEER_CONFIG = {
-  debug: 0,
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'turn:eu-0.turn.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
-      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
-    ]
+// ───────────────────────── ONLINE (native WebRTC, no libraries) ─────────────────────────
+// Connection is set up by copy-pasting two codes (invite → reply). No signalling server.
+// STUN only lets a device learn its own public address (nothing is loaded from it).
+// Set ICE_SERVERS = [] for zero outside contact: then only devices on the SAME Wi-Fi can connect.
+// You can also add your own TURN relay here for networks that block direct connections.
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  // { urls: 'turn:your.server:3478', username: 'user', credential: 'pass' },
+];
+
+function b64url(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function unb64url(str) {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (str.length % 4) str += '=';
+  const bin = atob(str), u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+async function streamBytes(bytes, stream) {
+  return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
+}
+async function packSignal(desc) {
+  let bytes = new TextEncoder().encode(JSON.stringify({ t: desc.type, s: desc.sdp }));
+  let tag = 'P0';
+  if (window.CompressionStream) {
+    try { bytes = await streamBytes(bytes, new CompressionStream('deflate-raw')); tag = 'P1'; } catch (e) {}
   }
-};
+  return tag + b64url(bytes);
+}
+async function unpackSignal(text) {
+  let t = String(text || '').trim();
+  const h = t.indexOf('#j='); if (h >= 0) t = t.slice(h + 3);
+  t = t.replace(/\s+/g, '');
+  if (t.length < 20 || (t[0] !== 'P') || (t[1] !== '0' && t[1] !== '1')) throw new Error('That is not a valid code.');
+  let bytes;
+  try { bytes = unb64url(t.slice(2)); } catch (e) { throw new Error('Code is damaged — copy it again.'); }
+  if (t[1] === '1') {
+    if (!window.DecompressionStream) throw new Error('This browser is too old for these codes.');
+    try { bytes = await streamBytes(bytes, new DecompressionStream('deflate-raw')); }
+    catch (e) { throw new Error('Code is damaged — copy it again.'); }
+  }
+  let o;
+  try { o = JSON.parse(new TextDecoder().decode(bytes)); } catch (e) { throw new Error('Code is damaged — copy it again.'); }
+  if (!o || !o.s || (o.t !== 'offer' && o.t !== 'answer')) throw new Error('That is not a valid code.');
+  return { type: o.t, sdp: o.s };
+}
+function waitIce(pc, ms) {
+  return new Promise(res => {
+    if (pc.iceGatheringState === 'complete') return res();
+    const done = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } };
+    const t = setTimeout(res, ms || 4000);
+    pc.addEventListener('icegatheringstatechange', done);
+  });
+}
+
+// small connection object: .open .send(obj) .close() .metadata .on('open'|'data'|'close', fn)
+function makeLink(pc) {
+  const L = {
+    pc, dc: null, metadata: null, _h: {}, _closed: false, _opened: false, _dt: 0,
+    on(ev, fn) { (this._h[ev] = this._h[ev] || []).push(fn); return this; },
+    _emit(ev, a) { for (const f of (this._h[ev] || [])) { try { f(a); } catch (e) { console.error(e); } } },
+    get open() { return !!this.dc && this.dc.readyState === 'open'; },
+    send(obj) { if (this.open) this.dc.send(JSON.stringify(obj)); },
+    close() { this._closed = true; clearTimeout(this._dt); try { this.dc && this.dc.close(); } catch (e) {} try { pc.close(); } catch (e) {} },
+    _lost() {
+      if (this._closed) return;
+      this._closed = true; clearTimeout(this._dt);
+      try { this.dc && this.dc.close(); } catch (e) {}
+      try { pc.close(); } catch (e) {}
+      this._emit('close');
+    },
+  };
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+    if (st === 'failed' || st === 'closed') L._lost();
+    else if (st === 'disconnected') {
+      clearTimeout(L._dt);
+      L._dt = setTimeout(() => { if (pc.connectionState === 'disconnected') L._lost(); }, 6000);
+    }
+  };
+  return L;
+}
+function bindChannel(L, dc) {
+  L.dc = dc;
+  dc.onopen = () => { if (!L._opened) { L._opened = true; L._emit('open'); } };
+  dc.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch (err) { return; } L._emit('data', m); };
+  dc.onclose = () => L._lost();
+  if (dc.readyState === 'open') setTimeout(() => dc.onopen && dc.onopen(), 0);
+}
+async function createInvite() {
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const L = makeLink(pc);
+  bindChannel(L, pc.createDataChannel('pen', { ordered: true }));
+  await pc.setLocalDescription(await pc.createOffer());
+  await waitIce(pc);
+  return { link: L, code: await packSignal(pc.localDescription) };
+}
+async function acceptReply(link, text) {
+  const d = await unpackSignal(text);
+  if (d.type !== 'answer') throw new Error('That is an invite code. Paste the friend\'s REPLY code here.');
+  await link.pc.setRemoteDescription(d);
+}
+async function createReply(text) {
+  const d = await unpackSignal(text);
+  if (d.type !== 'offer') throw new Error('That is a reply code. Paste the host\'s INVITE code here.');
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const L = makeLink(pc);
+  pc.ondatachannel = e => bindChannel(L, e.channel);
+  await pc.setRemoteDescription(d);
+  await pc.setLocalDescription(await pc.createAnswer());
+  await waitIce(pc);
+  return { link: L, code: await packSignal(pc.localDescription) };
+}
 
 const PEN_INERTIA = (() => {
   const mBody = 0.8, mCap = 0.2;
@@ -322,10 +445,10 @@ const PEN_INERTIA = (() => {
 })();
 
 const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+if (window.ResizeObserver) new ResizeObserver(fitCanvas).observe(canvas);
 
-/* =========================================================
-   SEEDED RNG
-   ========================================================= */
 let _seed = (Math.random() * 1e9) | 0;
 function setSeed(s) { _seed = (s | 0) || 1; }
 function srand() {
@@ -352,9 +475,6 @@ const PALETTE = [
   { body:'#06b6d4', light:'#67e8f9', dark:'#164e63', cap:'#155e75' },
 ];
 
-/* =========================================================
-   IDENTITY
-   ========================================================= */
 function getOrCreateToken() {
   let t = null;
   try { t = localStorage.getItem('pfj_token'); } catch(e){}
@@ -368,9 +488,6 @@ function getSavedName() { try { return localStorage.getItem('pfj_name') || ''; }
 function saveName(n) { try { localStorage.setItem('pfj_name', n); } catch(e){} }
 const MY_TOKEN = getOrCreateToken();
 
-/* =========================================================
-   NOTIFICATIONS
-   ========================================================= */
 const notificationsEl = document.getElementById('notifications');
 let activeNotifications = 0;
 const MAX_NOTIFICATIONS = 5;
@@ -399,9 +516,6 @@ function hostNotifyAll(text, type = 'info', duration = NOTIFY_MS) {
   netBroadcast({ t: 'notify', text, type, duration });
 }
 
-/* =========================================================
-   NET STATE
-   ========================================================= */
 const net = {
   peer: null, isHost: false, roomCode: '', phase: 'idle',
   conns: {}, mySlot: -1, hostConn: null,
@@ -419,9 +533,6 @@ let guestReconnectAttempts = 0;
 
 let sparks = [];
 
-/* =========================================================
-   CHAT
-   ========================================================= */
 const chatToggle   = document.getElementById('chatToggle');
 const chatFloat    = document.getElementById('chatFloat');
 const chatFloatBox = document.getElementById('chatFloatBox');
@@ -458,6 +569,7 @@ chatToggle.onclick = () => {
     chatBadge.classList.remove('show');
     chatFloatInput.focus();
     renderFloatChat();
+    placeInvite('chatInviteSlot');
   }
 };
 function sendFloatChat() {
@@ -477,9 +589,6 @@ function sendFloatChat() {
 chatFloatSend.onclick = sendFloatChat;
 chatFloatInput.onkeydown = e => { if (e.key === 'Enter') sendFloatChat(); };
 
-/* =========================================================
-   PEN / PHYSICS
-   ========================================================= */
 function makePen(x, y, angle, index, isCpu) {
   const p = {
     x, y, angle, vx:0, vy:0, omega:0,
@@ -545,6 +654,10 @@ function closestSegSeg(p1x,p1y,q1x,q1y,p2x,p2y,q2x,q2y) {
   return { c1x: p1x + d1x*s, c1y: p1y + d1y*s, c2x: p2x + d2x*t, c2y: p2y + d2y*t };
 }
 function resolvePenPair(a, b) {
+  // broad phase: geometric centres too far apart to possibly touch
+  const bx0 = (a.x + a.cx) - (b.x + b.cx), by0 = (a.y + a.cy) - (b.y + b.cy);
+  const lim = PEN_LEN + PEN_WID;
+  if (bx0*bx0 + by0*by0 > lim*lim) return;
   const ea = penEnds(a), eb = penEnds(b);
   const res = closestSegSeg(ea.a1x, ea.a1y, ea.a2x, ea.a2y, eb.a1x, eb.a1y, eb.a2x, eb.a2y);
   let dx = res.c2x - res.c1x, dy = res.c2y - res.c1y;
@@ -583,10 +696,9 @@ function resolvePenPair(a, b) {
     
     if (!simMode && Math.abs(vn) > 120) {
       sfxPlasticHit(Math.abs(vn));
-      // Add sparks
       if (Math.abs(vn) > 250) {
         const mag = Math.min(Math.abs(vn) / 1000, 1);
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 4 && sparks.length < 60; i++) {
           sparks.push({
             x: px, y: py,
             vx: (Math.random() - 0.5) * 250 * mag,
@@ -642,8 +754,9 @@ function physicsStep(pens, dt) {
 function allSettled(pens) {
   for (const p of pens) {
     if (p.out) continue;
-    if (Math.hypot(p.vx, p.vy) > 12) return false;
-    if (Math.abs(p.omega) > 0.6) return false;
+    // Higher threshold to end the turn almost instantly when it slows down
+    if (Math.hypot(p.vx, p.vy) > 40) return false;
+    if (Math.abs(p.omega) > 2.0) return false;
   }
   return true;
 }
@@ -697,10 +810,19 @@ function deserializePens(snap, playerCount) {
   return out;
 }
 
-/* =========================================================
-   AUDIO
-   ========================================================= */
 let audioCtx = null, simMode = false, muted = false;
+let lastHitSfx = -1;
+const noiseBufs = {};
+function getNoiseBuf(dur) {
+  if (!noiseBufs[dur] || noiseBufs[dur].sampleRate !== audioCtx.sampleRate) {
+    const n = Math.floor(audioCtx.sampleRate * dur);
+    const b = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+    const d = b.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    noiseBufs[dur] = b;
+  }
+  return noiseBufs[dur];
+}
 function initAudio() {
   if (!audioCtx) {
     try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
@@ -708,34 +830,81 @@ function initAudio() {
   }
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 }
+
 function sfxPlasticHit(intensity) {
   if (muted || simMode || !audioCtx) return;
   const t = audioCtx.currentTime;
+  if (t - lastHitSfx < 0.03) return;
+  lastHitSfx = t;
   const mag = Math.min(intensity / 1000, 1);
 
-  // High pitch ping
-  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-  o.type = 'triangle';
-  o.frequency.setValueAtTime(1500 + Math.random() * 500, t);
-  o.frequency.exponentialRampToValueAtTime(300, t + 0.03);
-  g.gain.setValueAtTime(Math.min(intensity * 0.0002, 0.25), t);
-  g.gain.exponentialRampToValueAtTime(0.0008, t + 0.04);
-  o.connect(g).connect(audioCtx.destination);
-  o.start(t); o.stop(t + 0.05);
+  // 1. High Pitch Crack (5750 Hz)
+  const osc = audioCtx.createOscillator();
+  osc.type = 'triangle'; 
+  osc.frequency.setValueAtTime(5750, t);
+  osc.frequency.exponentialRampToValueAtTime(1000, t + 0.015);
 
-  // Noise snap
-  const bufferSize = audioCtx.sampleRate * 0.03;
-  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-  const data = buffer.getChannelData(0);
-  for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+  const oscGain = audioCtx.createGain();
+  oscGain.gain.setValueAtTime(0.4 * mag, t);
+  oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.02);
+
+  osc.connect(oscGain).connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + 0.025);
+
+  // 2. High Noise (Bandpass 5750 Hz)
   const noise = audioCtx.createBufferSource();
-  noise.buffer = buffer;
-  const ng = audioCtx.createGain();
-  ng.gain.setValueAtTime(Math.min(intensity * 0.00015, 0.15), t);
-  ng.gain.exponentialRampToValueAtTime(0.0008, t + 0.02);
-  noise.connect(ng).connect(audioCtx.destination);
+  noise.buffer = getNoiseBuf(0.03);
+
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'bandpass'; 
+  filter.frequency.value = 5750; 
+  filter.Q.value = 1.5;
+
+  const noiseGain = audioCtx.createGain();
+  noiseGain.gain.setValueAtTime(0.5 * mag, t); 
+  noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.03);
+
+  noise.connect(filter).connect(noiseGain).connect(audioCtx.destination);
   noise.start(t);
 }
+
+function sfxFlick(power) {
+  if (muted || !audioCtx) return;
+  const t = audioCtx.currentTime;
+  const mag = Math.min(power, 1);
+
+  // 1. Thud Body (450 Hz -> 100 Hz)
+  const osc = audioCtx.createOscillator();
+  osc.type = 'triangle'; 
+  osc.frequency.setValueAtTime(450, t);
+  osc.frequency.exponentialRampToValueAtTime(100, t + 0.05);
+
+  const oscGain = audioCtx.createGain();
+  oscGain.gain.setValueAtTime(0.4 * mag, t);
+  oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+
+  osc.connect(oscGain).connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + 0.09);
+
+  // 2. Slide Texture (Low-passed Noise)
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = getNoiseBuf(0.08);
+
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass'; 
+  filter.frequency.setValueAtTime(1200, t);
+  filter.frequency.exponentialRampToValueAtTime(300, t + 0.06);
+
+  const noiseGain = audioCtx.createGain();
+  noiseGain.gain.setValueAtTime(0.3 * mag, t); 
+  noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+
+  noise.connect(filter).connect(noiseGain).connect(audioCtx.destination);
+  noise.start(t);
+}
+
 function sfxTone(freq, dur, vol, type) {
   if (muted || !audioCtx) return;
   const t = audioCtx.currentTime;
@@ -748,9 +917,6 @@ function sfxTone(freq, dur, vol, type) {
   o.start(t); o.stop(t + dur + 0.02);
 }
 
-/* =========================================================
-   GAME STATE
-   ========================================================= */
 let pens = [];
 let gameState = 'menu';
 let mode = 'cpu';
@@ -777,9 +943,6 @@ let spectating = false;
 const overlay = document.getElementById('overlay');
 const panel   = document.getElementById('panel');
 
-/* =========================================================
-   HELPERS
-   ========================================================= */
 function playerName(i) {
   if (mode === 'online') {
     const p = onlinePlayers.find(p => p.slot === i);
@@ -834,9 +997,6 @@ function buildBreakerOrderFor(idxs, count) {
   return order.slice(0, count);
 }
 
-/* =========================================================
-   NET LAYER
-   ========================================================= */
 function netSendTo(conn, obj) { if (conn && conn.open) { try { conn.send(obj); } catch(e){} } }
 function netBroadcast(obj) {
   for (const tok in net.conns) netSendTo(net.conns[tok], obj);
@@ -857,164 +1017,196 @@ function savedOrTypedName() {
   return n;
 }
 
-function hostTryCreate(attempt) {
-  attempt = attempt || 0;
-  if (attempt > 6) {
-    pushNotification('Could not create a room. Try again.', 'danger', 3000);
-    net.phase = 'idle';
-    if (gameState === 'menu') paintMenu();
-    return;
-  }
+function hostTryCreate() {
   net.roomCode = genRoomCode();
   net.isHost = true;
-  net.phase = 'hosting';
-  try {
-    net.peer = new Peer(PEER_ID_PREFIX + net.roomCode, PEER_CONFIG);
-  } catch(e) {
-    pushNotification('Peer create failed: ' + e.message, 'danger', 3000);
-    net.phase = 'idle';
-    return;
-  }
-  net.peer.on('open', () => {
-    net.phase = 'lobby';
-    net.mySlot = 0;
-    onlinePlayers = [{
-      slot: 0, token: MY_TOKEN, name: savedOrTypedName(), ready: true,
-      connected: true, spectator: false, isHost: true, disconnectedAt: null
-    }];
-    onlineRounds = defaultRoundsFor(1);
-    onlineRoundsOverridden = false;
-    paintLobby();
-  });
-  net.peer.on('error', (e) => {
-    if (e.type === 'unavailable-id') {
-      try { net.peer.destroy(); } catch(x){}
-      net.peer = null;
-      setTimeout(() => hostTryCreate(attempt + 1), 100);
-    } else {
-      if (net.phase !== 'lobby') pushNotification('Network error: ' + e.type, 'danger');
-    }
-  });
-  net.peer.on('connection', (conn) => {
-    conn.on('data', (msg) => hostOnGuestMessage(conn, msg));
-    conn.on('close', () => hostOnConnClosed(conn));
-    conn.on('error', () => {});
-  });
+  net.phase = 'lobby';
+  net.mySlot = 0;
+  onlinePlayers = [{
+    slot: 0, token: MY_TOKEN, name: savedOrTypedName(), ready: true,
+    connected: true, spectator: false, isHost: true, disconnectedAt: null
+  }];
+  onlineRounds = defaultRoundsFor(1);
+  onlineRoundsOverridden = false;
+  paintLobby();
 }
 
-function guestTryJoin(code, silent) {
-  code = (code || '').trim().toUpperCase();
-  if (code.length !== 4) {
-    if (!silent) pushNotification('Enter a 4-character code.', 'warn');
+// ---- host: invite box (lives in the lobby, and in the chat panel during a match) ----
+let inviteState = null;     // { busy, code, link, reply, status, accepted }
+const inviteEl = document.createElement('div');
+inviteEl.id = 'inviteBox';
+
+function renderInvite() {
+  if (!net.isHost) { inviteEl.innerHTML = ''; return; }
+  const full = onlinePlayers.length >= 10;
+  if (!inviteState) {
+    inviteEl.innerHTML = `<button class="btn small" id="invAdd" ${full ? 'disabled' : ''}>＋ INVITE / RECONNECT A PLAYER</button>`;
+    inviteEl.querySelector('#invAdd').onclick = startInvite;
     return;
   }
-  net.roomCode = code;
-  net.isHost = false;
-  net.phase = 'joining';
-  let timedOut = false;
-
-  if (net.peer) { try { net.peer.destroy(); } catch(e){} }
-  try { net.peer = new Peer(PEER_CONFIG); }
-  catch(e) {
-    if (!silent) pushNotification('Peer create failed: ' + e.message, 'danger');
-    net.phase = 'idle';
+  if (inviteState.busy) {
+    inviteEl.innerHTML = `<div class="statusLine">Creating invite…</div>`;
     return;
   }
-
-  const joinTimeout = setTimeout(() => {
-    timedOut = true;
-    if (net.phase === 'joining' && !silent) {
-      pushNotification('Could not reach the room. Check the code.', 'danger', 3000);
-      leaveRoom();
-      if (gameState === 'menu') paintMenu();
-    }
-  }, 20000);
-
-  net.peer.on('open', () => {
-    const conn = net.peer.connect(PEER_ID_PREFIX + code, { reliable: true });
-    net.hostConn = conn;
-    
-    conn.on('open', () => {
-      clearTimeout(joinTimeout);
-      netSendToHost({ t: 'hello', token: MY_TOKEN, name: savedOrTypedName() });
-    });
-    
-    conn.on('data', (msg) => { guestReconnectAttempts = 0; guestOnHostMessage(msg); });
-    conn.on('close', () => guestOnHostClosed());
-    
-    conn.on('error', (e) => {
-      clearTimeout(joinTimeout);
-      if (!silent && !timedOut) {
-        pushNotification('Room not found or host is offline.', 'danger', 3000);
-        leaveRoom();
-        if (gameState === 'menu') paintMenu();
+  inviteEl.innerHTML = `
+    <div class="diff-label">1 · Send this invite to your friend</div>
+    <textarea class="sigBox" id="invCode" readonly>${escapeHtml(inviteState.code)}</textarea>
+    <div class="copyRow">
+      <button class="btn small" id="invCopy">📋 Copy code</button>
+      <button class="btn small secondary" id="invCopyLink">🔗 Copy link</button>
+    </div>
+    <div class="diff-label">2 · Paste their reply code</div>
+    <textarea class="sigBox" id="invReply" placeholder="Paste reply code…"></textarea>
+    <div class="statusLine" id="invStatus">${escapeHtml(inviteState.status || '')}</div>
+    <div class="copyRow">
+      <button class="btn small" id="invConnect">CONNECT</button>
+      <button class="btn small secondary" id="invCancel">CANCEL</button>
+    </div>`;
+  const replyEl = inviteEl.querySelector('#invReply');
+  replyEl.value = inviteState.reply || '';
+  replyEl.oninput = () => { inviteState.reply = replyEl.value; };
+  replyEl.onpaste = () => setTimeout(() => { inviteState.reply = replyEl.value; connectInvite(); }, 30);
+  inviteEl.querySelector('#invCopy').onclick = e => copyText(inviteState.code, e.target, '📋 Copy code');
+  inviteEl.querySelector('#invCopyLink').onclick = e =>
+    copyText(`${location.origin}${location.pathname}#j=${inviteState.code}`, e.target, '🔗 Copy link');
+  inviteEl.querySelector('#invConnect').onclick = connectInvite;
+  inviteEl.querySelector('#invCancel').onclick = cancelInvite;
+}
+function setInviteStatus(t) {
+  if (inviteState) inviteState.status = t;
+  const el = inviteEl.querySelector('#invStatus'); if (el) el.textContent = t;
+}
+function copyText(text, btn, label) {
+  const done = () => { btn.textContent = '✓ Copied!'; setTimeout(() => { btn.textContent = label; }, 1500); };
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta); done();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+  else fallback();
+}
+function placeInvite(slotId) {
+  const slot = document.getElementById(slotId);
+  if (!slot) return;
+  slot.innerHTML = '';
+  if (net.isHost && net.phase !== 'idle') {
+    slot.appendChild(inviteEl);
+    if (!inviteEl.firstChild) renderInvite();
+  }
+}
+async function startInvite() {
+  if (inviteState) return;
+  inviteState = { busy: true };
+  renderInvite();
+  try {
+    const inv = await createInvite();
+    if (!inviteState) { inv.link.close(); return; }
+    inviteState = { code: inv.code, link: inv.link, reply: '', status: '', accepted: false };
+    inv.link.on('data', msg => hostOnGuestMessage(inv.link, msg));
+    inv.link.on('close', () => hostOnConnClosed(inv.link));
+    inv.link.on('open', () => { if (inviteState && inviteState.link === inv.link) { inviteState = null; renderInvite(); } });
+  } catch (e) {
+    inviteState = null;
+    pushNotification('Could not create invite: ' + (e.message || e), 'danger', 3500);
+  }
+  renderInvite();
+}
+async function connectInvite() {
+  if (!inviteState || !inviteState.link || inviteState.accepted) return;
+  const text = (inviteState.reply || '').trim();
+  if (!text) { setInviteStatus('Paste the reply code first.'); return; }
+  const link = inviteState.link;
+  try {
+    await acceptReply(link, text);
+    inviteState.accepted = true;
+    setInviteStatus('Connecting…');
+    setTimeout(() => {
+      if (inviteState && inviteState.link === link && !link.open) {
+        inviteState.accepted = false; link.close();
+        inviteState = null; renderInvite();
+        pushNotification('Could not connect. Try again — same Wi-Fi works best.', 'warn', 4500);
       }
-    });
-  });
+    }, 25000);
+  } catch (e) {
+    setInviteStatus(e.message || 'Invalid reply code.');
+  }
+}
+function cancelInvite() {
+  if (inviteState && inviteState.link) inviteState.link.close();
+  inviteState = null;
+  renderInvite();
+}
 
-  net.peer.on('error', (e) => {
-    clearTimeout(joinTimeout);
-    if (!silent && !timedOut) {
-      pushNotification('Join failed: ' + e.type + '. Check the code.', 'danger', 3000);
-      leaveRoom();
-      if (gameState === 'menu') paintMenu();
-    }
+// ---- guest: paste invite → create reply → host connects ----
+let joinLink = null, joinTimer = 0;
+function setJoinStatus(t) { const el = document.getElementById('joinStatus'); if (el) el.textContent = t; }
+function resetJoinUI() {
+  const go = document.getElementById('joinGo'); if (go) go.disabled = false;
+  const w = document.getElementById('joinReplyWrap'); if (w) w.style.display = 'none';
+}
+function cancelJoin() {
+  clearTimeout(joinTimer);
+  if (joinLink) { joinLink.close(); }
+  joinLink = null; net.hostConn = null;
+  if (net.phase === 'joining') net.phase = 'idle';
+}
+async function guestStartJoin(raw) {
+  cancelJoin();
+  const { link, code } = await createReply(raw);   // throws a readable error for bad codes
+  net.isHost = false; net.phase = 'joining';
+  joinLink = link; net.hostConn = link;
+  link.on('open', () => {
+    clearTimeout(joinTimer);
+    netSendToHost({ t: 'hello', token: MY_TOKEN, name: savedOrTypedName() });
   });
+  link.on('data', msg => { guestReconnectAttempts = 0; guestOnHostMessage(msg); });
+  link.on('close', () => {
+    if (net.phase === 'joining') {
+      cancelJoin(); resetJoinUI();
+      setJoinStatus('Connection failed. Ask the host for a fresh invite and try again.');
+    } else guestOnHostClosed();
+  });
+  const rw = document.getElementById('joinReplyWrap');
+  const rb = document.getElementById('joinReply');
+  if (rw && rb) { rb.value = code; rw.style.display = ''; }
+  const cb = document.getElementById('joinCopy');
+  if (cb) cb.onclick = e => copyText(code, e.target, '📋 Copy reply');
+  setJoinStatus('2 · Send this reply to the host. Waiting for them to connect…');
+  joinTimer = setTimeout(() => {
+    if (net.phase === 'joining') {
+      cancelJoin(); resetJoinUI();
+      setJoinStatus('Timed out. Ask the host for a fresh invite and try again.');
+    }
+  }, 180000);
 }
 
 function leaveRoom() {
+  cancelJoin();
+  if (inviteState && inviteState.link) { try { inviteState.link.close(); } catch(e){} }
+  inviteState = null; inviteEl.innerHTML = '';
   if (net.hostConn) { try { net.hostConn.close(); } catch(e){} }
   for (const tok in net.conns) { try { net.conns[tok].close(); } catch(e){} }
-  if (net.peer) { try { net.peer.destroy(); } catch(e){} }
   net.hostConn = null; net.conns = {}; net.peer = null;
   net.phase = 'idle'; net.isHost = false; net.roomCode = ''; net.mySlot = -1;
   onlinePlayers = []; chatLog = []; unreadChat = 0;
   chatBadge.classList.remove('show');
   chatFloat.classList.remove('show');
   chatToggle.classList.remove('show');
-  try { localStorage.removeItem('pfj_room'); } catch(e){}
 }
 
 function onHostDisconnect() {
   if (net.isHost) return;
-  pushNotification('Host disconnected — reconnecting…', 'warn', 3000);
   attemptGuestReconnect();
 }
 
-const MAX_GUEST_RECONNECT = 8;
+// Without a server a lost link can't be re-made automatically: the host sends a new invite.
 function attemptGuestReconnect() {
-  if (guestReconnectAttempts >= MAX_GUEST_RECONNECT) {
-    pushNotification('Could not reconnect. Returning to menu.', 'danger', 3000);
-    setTimeout(() => { leaveRoom(); gameState = 'menu'; showMenu(); }, 1500);
-    return;
-  }
-  guestReconnectAttempts++;
-  const code = net.roomCode;
-  const myName = (onlinePlayers[net.mySlot] && onlinePlayers[net.mySlot].name) || savedOrTypedName();
-  
-  if (net.hostConn) { try { net.hostConn.close(); } catch(e){} }
-  if (net.peer) { try { net.peer.destroy(); } catch(e){} }
-  net.hostConn = null; net.peer = null;
-  net.phase = 'joining'; net.roomCode = code;
-  
-  setTimeout(() => {
-    try { net.peer = new Peer(PEER_CONFIG); }
-    catch(e) { setTimeout(attemptGuestReconnect, 1500); return; }
-    net.peer.on('open', () => {
-      const conn = net.peer.connect(PEER_ID_PREFIX + code, { reliable: true });
-      net.hostConn = conn;
-      conn.on('open', () => netSendToHost({ t: 'hello', token: MY_TOKEN, name: myName }));
-      conn.on('data', (msg) => { guestReconnectAttempts = 0; guestOnHostMessage(msg); });
-      conn.on('close', () => guestOnHostClosed());
-      conn.on('error', () => {});
-    });
-    net.peer.on('error', () => setTimeout(attemptGuestReconnect, 1800));
-  }, 1400);
+  pushNotification('Connection to the host was lost. Ask the host for a new invite to rejoin.', 'danger', 5000);
+  setTimeout(() => { leaveRoom(); gameState = 'menu'; showMenu(); }, 1200);
 }
 
-/* =========================================================
-   HOST MESSAGE HANDLERS
-   ========================================================= */
 function hostOnGuestMessage(conn, msg) {
   if (!msg || !msg.t) return;
 
@@ -1099,7 +1291,7 @@ function hostOnGuestMessage(conn, msg) {
 
 function buildWelcomePacket(p) {
   return {
-    t: 'welcome', slot: p.slot, name: p.name, isSpectator: p.spectator,
+    t: 'welcome', room: net.roomCode, slot: p.slot, name: p.name, isSpectator: p.spectator,
     players: onlinePlayers.map(publicPlayer),
     rounds: onlineRounds, roundsOverridden: onlineRoundsOverridden,
     scores: onlineScores.slice(), round: roundIndex,
@@ -1157,7 +1349,11 @@ function hostRemovePlayer(me, why) {
     for (let i = 0; i < pens.length; i++) {
       if (i === slotToRemove) continue;
       const p = pens[i];
-      if (p) p.index = newPens.length;
+      if (p) {
+        p.index = newPens.length;
+        p.style = PALETTE[p.index % PALETTE.length];
+        p._k = undefined;
+      }
       newPens.push(p);
     }
     pens = newPens;
@@ -1266,9 +1462,6 @@ function hostBroadcastMatchEnd() {
   netBroadcast({ t: 'matchEnd', scores: onlineScores.slice() });
 }
 
-/* =========================================================
-   GUEST MESSAGE HANDLERS
-   ========================================================= */
 function guestOnHostMessage(msg) {
   if (!msg || !msg.t) return;
 
@@ -1283,6 +1476,7 @@ function guestOnHostMessage(msg) {
       return;
     case 'welcome': {
       net.phase = 'lobby';
+      net.roomCode = msg.room || net.roomCode;
       net.mySlot = msg.slot;
       spectating = !!msg.isSpectator;
       onlinePlayers = msg.players.map(publicPlayer);
@@ -1290,7 +1484,6 @@ function guestOnHostMessage(msg) {
       onlineRoundsOverridden = !!msg.roundsOverridden;
       onlineScores = msg.scores || [];
       
-      try { localStorage.setItem('pfj_room', JSON.stringify({ code: net.roomCode, ts: Date.now() })); } catch(e){}
 
       if (msg.phase === 'playing' && msg.pens) {
         mode = 'online';
@@ -1391,7 +1584,18 @@ function guestOnHostMessage(msg) {
       turn = msg.slot;
       turnStartTime = performance.now();
       turnDeadline = turnStartTime + (msg.remainingMs || TURN_MS);
-      pens = deserializePens(msg.pens, playerCount);
+      {
+        const old = pens;
+        pens = deserializePens(msg.pens, playerCount);
+        for (let i = 0; i < pens.length; i++) {
+          const o = old[i], n = pens[i];
+          if (!o || !n || o.out || n.out) continue;
+          const dx = o.x - n.x, dy = o.y - n.y;
+          let da = o.angle - n.angle;
+          da = Math.atan2(Math.sin(da), Math.cos(da));
+          if (Math.abs(dx) + Math.abs(dy) < 80) { n.ox = dx; n.oy = dy; n.oa = da; }
+        }
+      }
       gameState = 'aiming';
       roundOver = false;
       settleTimer = 0;
@@ -1400,7 +1604,7 @@ function guestOnHostMessage(msg) {
     case 'applyFlick':
       if (pens[msg.slot]) {
         flick(pens[msg.slot], { x: msg.nx, y: msg.ny }, msg.speed, { x: msg.hx, y: msg.hy });
-        sfxTone(180 + Math.min(msg.speed / MAX_SPEED, 1) * 260, 0.07, 0.05, 'sawtooth');
+        sfxFlick(msg.speed / MAX_SPEED);
       }
       gameState = 'moving';
       settleTimer = 0;
@@ -1443,9 +1647,6 @@ function guestOnHostMessage(msg) {
 }
 function guestOnHostClosed() { onHostDisconnect(); }
 
-/* =========================================================
-   HOST MATCH CONTROL
-   ========================================================= */
 function hostStartMatch() {
   if (!net.isHost) return;
   const waiting = onlinePlayers.filter(p => !p.isHost && !p.spectator && !p.ready);
@@ -1492,7 +1693,7 @@ function hostApplyGuestFlick(slot, msg) {
   const pen = pens[slot];
   if (!pen || pen.out) return;
   flick(pen, { x: msg.nx, y: msg.ny }, msg.speed, { x: msg.hx, y: msg.hy });
-  sfxTone(180 + Math.min(msg.speed / MAX_SPEED, 1) * 260, 0.07, 0.05, 'sawtooth');
+  sfxFlick(msg.speed / MAX_SPEED);
   gameState = 'moving';
   settleTimer = 0;
   hostBroadcastApplyFlick(slot, msg);
@@ -1512,9 +1713,6 @@ function hostTimeout() {
   }, 200);
 }
 
-/* =========================================================
-   ROUND / MATCH FLOW
-   ========================================================= */
 function resetPens() {
   const cx = DESK.x + DESK.w / 2;
   const cy = DESK.y + DESK.h / 2;
@@ -1786,9 +1984,6 @@ function showMatchEndDisconnect(name) {
   };
 }
 
-/* =========================================================
-   AI
-   ========================================================= */
 function simulate(shooterIdx, targetIdx, dir, speed, hitPoint) {
   const sim = pens.map(p => ({ ...p }));
   flick(sim[shooterIdx], dir, speed, hitPoint);
@@ -1822,7 +2017,7 @@ function doAIShot() {
   if (target === -1) target = (shooter + 1) % pens.length;
   const pen = pens[shooter], opp = pens[target];
   const baseAngle = Math.atan2(opp.y - pen.y, opp.x - pen.x);
-  const angles = [-0.14, 0, 0.14], speeds = [800, 1050, 1300], offsetFactors = [-0.85, 0, 0.85];
+  const angles = [-0.14, 0, 0.14], speeds = [800, 1050, 1200], offsetFactors = [-0.85, 0, 0.85];
   const minT = -COM_FROM_CAP, maxT = PEN_LEN - COM_FROM_CAP;
   const midT = (minT + maxT) / 2;
   let best = null, bestScore = -Infinity;
@@ -1844,14 +2039,11 @@ function doAIShot() {
   const a  = Math.atan2(best.dir.y, best.dir.x) + rand(-noiseA, noiseA);
   const sp = clamp(best.sp + rand(-noiseS, noiseS), 300, MAX_SPEED);
   flick(pens[best.shooter], { x: Math.cos(a), y: Math.sin(a) }, sp, best.hit);
-  sfxTone(420, 0.05, 0.04, 'square');
+  sfxFlick(sp / MAX_SPEED);
   gameState = 'moving';
   settleTimer = 0;
 }
 
-/* =========================================================
-   UPDATE
-   ========================================================= */
 function update(dt) {
   const active = (gameState === 'aiming' || gameState === 'moving' ||
                   gameState === 'ai' || gameState === 'roundend');
@@ -1859,6 +2051,7 @@ function update(dt) {
     acc += dt;
     let guard = 0;
     while (acc >= FIXED && guard < 80) {
+      for (const p of pens) { p.px = p.x; p.py = p.y; p.pa = p.angle; }
       physicsStep(pens, FIXED);
       acc -= FIXED;
       guard++;
@@ -1869,11 +2062,23 @@ function update(dt) {
         }
       }
     }
+    renderAlpha = clamp(acc / FIXED, 0, 1);
+  } else {
+    renderAlpha = 1;
+  }
+  // ease out any network snap corrections
+  const ck = Math.exp(-dt * 14);
+  for (const p of pens) {
+    if (p.ox || p.oy || p.oa) {
+      p.ox *= ck; p.oy *= ck; p.oa *= ck;
+      if (Math.abs(p.ox) + Math.abs(p.oy) + Math.abs(p.oa) < 0.02) { p.ox = p.oy = p.oa = 0; }
+    }
   }
   if (gameState === 'moving' && !roundOver) {
     if (allSettled(pens)) {
       settleTimer += dt;
-      if (settleTimer > 0.35) {
+      // Reduced to 0.1s so it transitions instantly when the pen stops
+      if (settleTimer > 0.1) {
         settleTimer = 0;
         if (mode === 'online') { if (net.isHost) resolveShot(); }
         else resolveShot();
@@ -1904,9 +2109,6 @@ function update(dt) {
   }
 }
 
-/* =========================================================
-   RENDER
-   ========================================================= */
 function roundRect(c, x, y, w, h, r) {
   r = Math.min(r, w/2, h/2);
   c.beginPath();
@@ -1917,8 +2119,6 @@ function roundRect(c, x, y, w, h, r) {
   c.arcTo(x,     y,     x + w, y,     r);
   c.closePath();
 }
-
-let deskCache = null;
 
 function buildDeskCache() {
   const w = DESK.w, h = DESK.h;
@@ -1960,82 +2160,149 @@ function buildDeskCache() {
   deskCache = cache;
 }
 
-function drawDesk() {
+function drawDesk(c) {
   if (!deskCache) buildDeskCache();
 
-  ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.65)';
-  ctx.shadowBlur = 45;
-  ctx.shadowOffsetY = 20;
-  ctx.fillStyle = '#5e4223';
-  roundRect(ctx, DESK.x, DESK.y, DESK.w, DESK.h, 18);
-  ctx.fill();
-  ctx.restore();
+  c.save();
+  c.shadowColor = 'rgba(0,0,0,0.65)';
+  c.shadowBlur = 45 * DPR;          // shadowBlur ignores transforms
+  c.shadowOffsetY = 20 * DPR;
+  c.fillStyle = '#5e4223';
+  roundRect(c, DESK.x, DESK.y, DESK.w, DESK.h, 18);
+  c.fill();
+  c.restore();
 
-  ctx.drawImage(deskCache, DESK.x, DESK.y, DESK.w, DESK.h);
+  c.drawImage(deskCache, DESK.x, DESK.y, DESK.w, DESK.h);
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-  ctx.lineWidth = 2;
-  roundRect(ctx, DESK.x+1.5, DESK.y+1.5, DESK.w-3, DESK.h-3, 16.5);
-  ctx.stroke();
+  c.strokeStyle = 'rgba(255,255,255,0.18)';
+  c.lineWidth = 2;
+  roundRect(c, DESK.x+1.5, DESK.y+1.5, DESK.w-3, DESK.h-3, 16.5);
+  c.stroke();
 
-  ctx.strokeStyle = 'rgba(50,30,12,0.62)';
-  ctx.lineWidth = 3;
-  roundRect(ctx, DESK.x, DESK.y, DESK.w, DESK.h, 18);
-  ctx.stroke();
+  c.strokeStyle = 'rgba(50,30,12,0.62)';
+  c.lineWidth = 3;
+  roundRect(c, DESK.x, DESK.y, DESK.w, DESK.h, 18);
+  c.stroke();
+}
+
+function buildScene() {
+  const sc = document.createElement('canvas');
+  sc.width = canvas.width; sc.height = canvas.height;
+  const c = sc.getContext('2d');
+  c.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const bg = c.createRadialGradient(W/2, H*0.2, 60, W/2, H*0.5, W*0.85);
+  bg.addColorStop(0, '#1c1f2b');
+  bg.addColorStop(1, '#0a0b10');
+  c.fillStyle = bg;
+  c.fillRect(0, 0, W, H);
+  drawDesk(c);
+  sceneCache = sc;
+}
+
+const SPR_PAD = 28;
+function buildPenSprites() {
+  penSprites.length = 0;
+  const L = PEN_LEN, Wd = PEN_WID, capLen = 20;
+  const sw = L + SPR_PAD * 2, sh = Wd + SPR_PAD * 2;
+  const OFF = 3000;   // draw shape far off-canvas so only its shadow lands on the sprite
+  const make = () => {
+    const cv = document.createElement('canvas');
+    cv.width = Math.ceil(sw * DPR); cv.height = Math.ceil(sh * DPR);
+    const g = cv.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, sw/2 * DPR, sh/2 * DPR);
+    return { cv, g };
+  };
+  for (const st of PALETTE) {
+    // soft drop shadow (rotates with pen; world offset is applied at draw time)
+    const S = make();
+    S.g.shadowColor = 'rgba(0,0,0,0.38)';
+    S.g.shadowBlur = 8 * DPR; S.g.shadowOffsetX = OFF; S.g.shadowOffsetY = 0;
+    S.g.fillStyle = '#000';
+    roundRect(S.g, -L/2 - OFF / DPR, -Wd/2, L, Wd, Wd/2);
+    S.g.fill();
+
+    // active glow
+    const G = make();
+    G.g.shadowColor = st.body;
+    G.g.shadowBlur = 20 * DPR; G.g.shadowOffsetX = OFF; G.g.shadowOffsetY = 0;
+    G.g.fillStyle = '#fff';
+    roundRect(G.g, -L/2 - OFF / DPR, -Wd/2, L, Wd, Wd/2);
+    G.g.fill();
+
+    // body
+    const B = make(), g = B.g;
+    const bg = g.createLinearGradient(0, -Wd/2, 0, Wd/2);
+    bg.addColorStop(0, st.light); bg.addColorStop(0.35, st.body); bg.addColorStop(1, st.dark);
+    g.fillStyle = bg;
+    roundRect(g, -L/2, -Wd/2, L, Wd, Wd/2); g.fill();
+    const capG = g.createLinearGradient(0, -Wd/2, 0, Wd/2);
+    capG.addColorStop(0, st.light); capG.addColorStop(0.35, st.cap); capG.addColorStop(1, st.dark);
+    g.fillStyle = capG;
+    roundRect(g, -L/2, -Wd/2, capLen, Wd, Wd/2); g.fill();
+    g.fillStyle = 'rgba(0,0,0,0.3)';
+    g.fillRect(-L/2 + capLen - 1, -Wd/2, 1.3, Wd);
+    g.fillStyle = 'rgba(255,255,255,0.42)';
+    roundRect(g, -L/2 + 4, -Wd/2 - 1.3, capLen - 8, 1.8, 0.9); g.fill();
+    g.beginPath();
+    g.arc(-L/2 + capLen - 3, -Wd/2 - 0.4, 1.4, 0, Math.PI * 2);
+    g.fillStyle = st.light; g.fill();
+    g.fillStyle = 'rgba(255,255,255,0.3)';
+    roundRect(g, -L/2 + capLen + 4, -Wd/2 + 1, L - capLen - 12, 1, 0.5); g.fill();
+    g.fillStyle = 'rgba(255,255,255,0.25)';
+    roundRect(g, L/2 - 3, -Wd/2, 1.5, Wd, 0.7); g.fill();
+
+    penSprites.push({ shadow: S.cv, glow: G.cv, body: B.cv, sw, sh });
+  }
+}
+
+// interpolated + network-corrected pose, no allocation
+const _pose = { x: 0, y: 0, a: 0 };
+function poseOf(p) {
+  let x = p.x, y = p.y, a = p.angle;
+  if (p.px !== undefined) {
+    x = p.px + (p.x - p.px) * renderAlpha;
+    y = p.py + (p.y - p.py) * renderAlpha;
+    a = p.pa + (p.angle - p.pa) * renderAlpha;
+  }
+  if (p.ox) { x += p.ox; y += p.oy; a += p.oa; }
+  _pose.x = x; _pose.y = y; _pose.a = a;
+  return _pose;
 }
 
 function drawPen(p, isActive) {
   if (p.alpha <= 0) return;
-  const L = p.length, Wd = p.width, capLen = 20;
+  if (!penSprites.length) buildPenSprites();
+  let k = p._k;
+  if (k === undefined || k < 0) k = p._k = Math.max(0, PALETTE.indexOf(p.style));
+  const spr = penSprites[k];
+  const ps = poseOf(p);
+  const fall = p.out ? 0.85 + 0.15 * p.alpha : 1;   // pens shrink slightly as they drop off the desk
+  const hw = spr.sw / 2, hh = spr.sh / 2;
+
   ctx.save();
   ctx.globalAlpha = p.alpha;
-  ctx.translate(p.x, p.y);
-  ctx.rotate(p.angle);
+
+  // shadow: fixed light direction, so offset in world space, rotate sprite only
+  ctx.translate(ps.x + 2, ps.y + 4);
+  ctx.rotate(ps.a);
   ctx.translate(COM_TO_GEOM, 0);
-  const st = p.style;
+  if (fall !== 1) ctx.scale(fall, fall);
+  ctx.drawImage(spr.shadow, -hw, -hh, spr.sw, spr.sh);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = p.alpha;
+  ctx.translate(ps.x, ps.y);
+  ctx.rotate(ps.a);
+  ctx.translate(COM_TO_GEOM, 0);
+  if (fall !== 1) ctx.scale(fall, fall);
   if (isActive && !p.out) {
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 280);
-    ctx.save();
-    ctx.shadowColor = st.body;
-    ctx.shadowBlur = 14 + pulse * 10;
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
-    roundRect(ctx, -L/2, -Wd/2, L, Wd, Wd/2);
-    ctx.fill();
-    ctx.restore();
+    ctx.globalAlpha = p.alpha * (0.35 + pulse * 0.35);
+    ctx.drawImage(spr.glow, -hw, -hh, spr.sw, spr.sh);
+    ctx.globalAlpha = p.alpha;
   }
-  ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.38)';
-  ctx.shadowBlur = 8; ctx.shadowOffsetX = 2; ctx.shadowOffsetY = 4;
-  ctx.fillStyle = st.body;
-  roundRect(ctx, -L/2, -Wd/2, L, Wd, Wd/2);
-  ctx.fill();
-  ctx.restore();
-  const bg = ctx.createLinearGradient(0, -Wd/2, 0, Wd/2);
-  bg.addColorStop(0, st.light); bg.addColorStop(0.35, st.body); bg.addColorStop(1, st.dark);
-  ctx.fillStyle = bg;
-  roundRect(ctx, -L/2, -Wd/2, L, Wd, Wd/2);
-  ctx.fill();
-  const capG = ctx.createLinearGradient(0, -Wd/2, 0, Wd/2);
-  capG.addColorStop(0, st.light); capG.addColorStop(0.35, st.cap); capG.addColorStop(1, st.dark);
-  ctx.fillStyle = capG;
-  roundRect(ctx, -L/2, -Wd/2, capLen, Wd, Wd/2);
-  ctx.fill();
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.fillRect(-L/2 + capLen - 1, -Wd/2, 1.3, Wd);
-  ctx.fillStyle = 'rgba(255,255,255,0.42)';
-  roundRect(ctx, -L/2 + 4, -Wd/2 - 1.3, capLen - 8, 1.8, 0.9);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(-L/2 + capLen - 3, -Wd/2 - 0.4, 1.4, 0, Math.PI * 2);
-  ctx.fillStyle = st.light;
-  ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,0.3)';
-  roundRect(ctx, -L/2 + capLen + 4, -Wd/2 + 1, L - capLen - 12, 1, 0.5);
-  ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,0.25)';
-  roundRect(ctx, L/2 - 3, -Wd/2, 1.5, Wd, 0.7);
-  ctx.fill();
+  ctx.drawImage(spr.body, -hw, -hh, spr.sw, spr.sh);
   ctx.restore();
 }
 
@@ -2158,8 +2425,12 @@ function drawHUD() {
     if (spectator) ctx.globalAlpha = 0.3;
     ctx.beginPath();
     ctx.arc(dotX, dotY, 4.5, 0, Math.PI * 2);
+    if (isActive) {
+      ctx.save(); ctx.globalAlpha *= 0.3; ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(dotX, dotY, 8, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+      ctx.beginPath(); ctx.arc(dotX, dotY, 4.5, 0, Math.PI * 2);
+    }
     ctx.fillStyle = col;
-    if (isActive) { ctx.shadowColor = col; ctx.shadowBlur = 8; }
     ctx.fill();
     ctx.restore();
     ctx.fillStyle = spectator ? 'rgba(148,163,184,0.4)' : '#cbd5e1';
@@ -2238,12 +2509,14 @@ function drawRoundBanner() {
   const scale = 1 + Math.max(0, (0.35 - (2.0 - roundEndTimer))) * 0.6;
   ctx.translate(W/2, H/2);
   ctx.scale(scale, scale);
-  ctx.shadowColor = roundMsgColor;
-  ctx.shadowBlur = 30;
-  ctx.fillStyle = roundMsgColor;
   ctx.font = '900 44px system-ui, sans-serif';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = roundMsgColor;
+  ctx.globalAlpha = a * 0.16; ctx.lineWidth = 16; ctx.strokeText(roundMsg, 0, -10);
+  ctx.globalAlpha = a * 0.28; ctx.lineWidth = 8;  ctx.strokeText(roundMsg, 0, -10);
+  ctx.globalAlpha = a;
+  ctx.fillStyle = roundMsgColor;
   ctx.fillText(roundMsg, 0, -10);
-  ctx.shadowBlur = 0;
   ctx.fillStyle = 'rgba(255,255,255,0.75)';
   ctx.font = '700 17px system-ui, sans-serif';
   const line = pens.map((_, i) => `${playerName(i)} ${score[i] || 0}`).join('   ·   ');
@@ -2252,12 +2525,8 @@ function drawRoundBanner() {
 }
 
 function render() {
-  const bg = ctx.createRadialGradient(W/2, H*0.2, 60, W/2, H*0.5, W*0.85);
-  bg.addColorStop(0, '#1c1f2b');
-  bg.addColorStop(1, '#0a0b10');
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
-  drawDesk();
+  if (!sceneCache) buildScene();
+  ctx.drawImage(sceneCache, 0, 0, W, H);
   for (let i = 0; i < pens.length; i++) {
     const isActive = (i === turn && gameState === 'aiming' && !pens[i].out);
     drawPen(pens[i], isActive);
@@ -2268,22 +2537,24 @@ function render() {
   }
   drawAim();
   
-  for (const s of sparks) {
-    ctx.fillStyle = `rgba(255, 220, 100, ${s.life / s.maxLife})`;
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, 2 + s.life * 10, 0, Math.PI * 2);
-    ctx.fill();
+  if (sparks.length) {
+    ctx.save();
+    ctx.fillStyle = 'rgb(255,220,100)';
+    for (const s of sparks) {
+      ctx.globalAlpha = Math.max(0, s.life / s.maxLife);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 2 + s.life * 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   }
   
   drawHUD();
   drawRoundBanner();
 }
 
-/* =========================================================
-   INPUT
-   ========================================================= */
 function getPos(e) {
-  const r = canvas.getBoundingClientRect();
+  const r = canvasRect || (canvasRect = canvas.getBoundingClientRect());
   return {
     x: (e.clientX - r.left) * (W / r.width),
     y: (e.clientY - r.top)  * (H / r.height)
@@ -2291,6 +2562,7 @@ function getPos(e) {
 }
 canvas.addEventListener('pointerdown', (e) => {
   initAudio();
+  canvasRect = canvas.getBoundingClientRect();
   if (gameState !== 'aiming') return;
   if (spectating) return;
   if (mode === 'online' && turn !== net.mySlot) return;
@@ -2326,7 +2598,7 @@ function releaseDrag() {
     if (mode === 'online') {
       if (net.isHost) {
         flick(pens[turn], { x: nx, y: ny }, speed, { x: drag.hx, y: drag.hy });
-        sfxTone(180 + power * 260, 0.07, 0.05, 'sawtooth');
+        sfxFlick(power);
         gameState = 'moving';
         settleTimer = 0;
         hostBroadcastApplyFlick(turn, msg);
@@ -2335,7 +2607,7 @@ function releaseDrag() {
       }
     } else {
       flick(pens[turn], { x: nx, y: ny }, speed, { x: drag.hx, y: drag.hy });
-      sfxTone(180 + power * 260, 0.07, 0.05, 'sawtooth');
+      sfxFlick(power);
       gameState = 'moving';
       settleTimer = 0;
     }
@@ -2348,16 +2620,18 @@ canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 window.addEventListener('pointerup', releaseDrag);
 window.addEventListener('pointercancel', () => { drag = null; });
 
-/* =========================================================
-   MAIN LOOP
-   ========================================================= */
-let lastT = performance.now();
+let lastT = performance.now(), lastDraw = 0;
 function loop(ts) {
   let dt = (ts - lastT) / 1000;
   lastT = ts;
   if (dt > 0.05) dt = 0.05;
+  if (dt < 0) dt = 0;
   update(dt);
-  render();
+  // behind a menu/lobby overlay nothing moves: redraw only a few times a second
+  if (!overlay.classList.contains('show') || ts - lastDraw > 250) {
+    render();
+    lastDraw = ts;
+  }
   requestAnimationFrame(loop);
 }
 document.addEventListener('visibilitychange', () => {
@@ -2366,11 +2640,8 @@ document.addEventListener('visibilitychange', () => {
   acc = 0; settleTimer = 0; aiTimer = Math.min(aiTimer, 0.65);
 });
 
-/* =========================================================
-   MENU / LOBBY UI
-   ========================================================= */
 function paintMenu() {
-  const preRoom = (new URLSearchParams(location.search)).get('room') || '';
+  const preInvite = location.hash.startsWith('#j=') ? location.hash.slice(3) : '';
   const savedNm = getSavedName();
   panel.innerHTML = `
     <h1>Pen খেলবি?</h1>
@@ -2389,14 +2660,18 @@ function paintMenu() {
         <button data-online="join">JOIN ROOM</button>
       </div>
       <div id="joinBox" style="display:none">
-        <p style="font-size:12px;color:#94a3b8;margin-bottom:.4em">Enter room code</p>
-        <input class="codeInput" id="joinCode" maxlength="4" placeholder="ABCD" value="${escapeHtml(preRoom)}"/>
+        <p style="font-size:12px;color:#94a3b8;margin-bottom:.4em">1 · Paste the invite code from the host</p>
+        <textarea class="sigBox" id="joinCode" placeholder="Paste invite code…">${escapeHtml(preInvite)}</textarea>
         <div style="margin-top:.6em">
           <input class="nameInput" id="joinName" maxlength="20" placeholder="Your name" value="${escapeHtml(savedNm)}"/>
         </div>
         <div class="statusLine" id="joinStatus"></div>
+        <div id="joinReplyWrap" style="display:none">
+          <textarea class="sigBox" id="joinReply" readonly></textarea>
+          <div class="copyRow"><button class="btn small" id="joinCopy">📋 Copy reply</button></div>
+        </div>
         <div style="margin-top:.4em">
-          <button class="btn" id="joinGo">JOIN</button>
+          <button class="btn" id="joinGo">CREATE REPLY</button>
           <button class="btn secondary" id="joinBack">BACK</button>
         </div>
       </div>
@@ -2414,7 +2689,7 @@ function paintMenu() {
 
     <div id="localWrap">
       <div id="friendSection" style="display:none">
-        <div class="diff-label">Number of Players (2–10)</div>
+        <div class="diff-label">Number of Players (2–10) · pass the device</div>
         <div class="diff" id="countRow">
           ${Array.from({length:9},(_,k)=>k+2).map(n=>`<button data-count="${n}">${n}</button>`).join('')}
         </div>
@@ -2438,10 +2713,9 @@ function paintMenu() {
   `;
   overlay.classList.add('show');
   wireMenu();
-  if (preRoom) {
+  if (preInvite) {
     document.querySelector('[data-go="online"]').click();
     document.querySelector('[data-online="join"]').click();
-    document.getElementById('joinCode').value = preRoom.toUpperCase().slice(0,4);
   }
 }
 
@@ -2506,23 +2780,25 @@ function wireMenu() {
   };
 
   const jBack = document.getElementById('joinBack');
-  if (jBack) jBack.onclick = () => { joinBox.style.display = 'none'; };
+  if (jBack) jBack.onclick = () => { cancelJoin(); resetJoinUI(); setJoinStatus(''); joinBox.style.display = 'none'; };
   const cBack = document.getElementById('createBack');
   if (cBack) cBack.onclick = () => { createBox.style.display = 'none'; };
 
   const joinGo = document.getElementById('joinGo');
-  if (joinGo) joinGo.onclick = () => {
-    const code = document.getElementById('joinCode').value.trim().toUpperCase();
-    const nm   = document.getElementById('joinName').value.trim();
+  if (joinGo) joinGo.onclick = async () => {
+    const nm = document.getElementById('joinName').value.trim();
     if (nm) saveName(nm);
-    guestTryJoin(code);
+    joinGo.disabled = true;
+    setJoinStatus('Creating reply…');
+    try { await guestStartJoin(document.getElementById('joinCode').value); }
+    catch (e) { joinGo.disabled = false; setJoinStatus(e.message || 'Invalid invite code.'); }
   };
 
   const createGo = document.getElementById('createGo');
   if (createGo) createGo.onclick = () => {
     const nm = document.getElementById('createName').value.trim();
     if (nm) saveName(nm);
-    hostTryCreate(0);
+    hostTryCreate();
   };
 
   document.querySelector('[data-go="cpu"]').click();
@@ -2532,7 +2808,6 @@ function paintLobby() {
   if (gameState !== 'menu') return;
   const my = onlinePlayers.find(p => p.slot === net.mySlot);
   const isHost = net.isHost;
-  const roomLink = `${location.origin}${location.pathname}?room=${net.roomCode}`;
   const nonHostPlayers = onlinePlayers.filter(p => !p.isHost && !p.spectator);
   const allReady = nonHostPlayers.every(p => p.ready);
   const canStart = isHost && onlinePlayers.filter(p => !p.spectator).length >= 2 && allReady;
@@ -2573,12 +2848,9 @@ function paintLobby() {
   const chatDraft = oldChatInput ? oldChatInput.value : '';
 
   panel.innerHTML = `
-    <h1>${escapeHtml(net.roomCode)}</h1>
-    <p class="sub" style="margin-bottom:.6em">Share this code or link with your friends</p>
-    <div class="copyRow">
-      <button class="btn small" id="copyLink">📋 Copy Link</button>
-      <button class="btn small secondary" id="copyCode">Copy Code</button>
-    </div>
+    <h1>ROOM ${escapeHtml(net.roomCode)}</h1>
+    <p class="sub" style="margin-bottom:.6em">${isHost ? 'Invite friends with a code — no server needed' : 'You are connected to the host'}</p>
+    <div id="inviteSlot"></div>
 
     <div class="diff-label" style="margin-top:1em">
       Players (${onlinePlayers.length}/10)
@@ -2613,45 +2885,11 @@ function paintLobby() {
   `;
 
   wireLobby();
+  placeInvite('inviteSlot');
   if (gameState === 'menu') overlay.classList.add('show');
 }
 
 function wireLobby() {
-  const copyLink = document.getElementById('copyLink');
-  if (copyLink) copyLink.onclick = () => {
-    const link = `${location.origin}${location.pathname}?room=${net.roomCode}`;
-    navigator.clipboard.writeText(link).then(() => {
-      copyLink.textContent = '✓ Copied!';
-      setTimeout(() => { copyLink.textContent = '📋 Copy Link'; }, 1500);
-    }).catch(() => {
-      const input = document.createElement('input');
-      input.value = link;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      document.body.removeChild(input);
-      copyLink.textContent = '✓ Copied!';
-      setTimeout(() => { copyLink.textContent = '📋 Copy Link'; }, 1500);
-    });
-  };
-  
-  const copyCode = document.getElementById('copyCode');
-  if (copyCode) copyCode.onclick = () => {
-    navigator.clipboard.writeText(net.roomCode).then(() => {
-      copyCode.textContent = '✓ Copied!';
-      setTimeout(() => { copyCode.textContent = 'Copy Code'; }, 1500);
-    }).catch(() => {
-      const input = document.createElement('input');
-      input.value = net.roomCode;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      document.body.removeChild(input);
-      copyCode.textContent = '✓ Copied!';
-      setTimeout(() => { copyCode.textContent = 'Copy Code'; }, 1500);
-    });
-  };
-
   const roundRow = document.getElementById('lobbyRoundRow');
   if (roundRow && net.isHost) {
     roundRow.querySelectorAll('[data-rounds]').forEach(b => {
@@ -2729,9 +2967,6 @@ function showMenu() {
   paintMenu();
 }
 
-/* =========================================================
-   BOOT
-   ========================================================= */
 resetPens();
 mode = 'cpu';
 paintMenu();
